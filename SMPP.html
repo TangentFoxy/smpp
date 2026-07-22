@@ -1,0 +1,883 @@
+<html>
+    <head>
+        <title>StarMade Production Planner</title>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <script src="jqueryui.custom/external/jquery/jquery.min.js"></script>
+        <script src="vis/vis.min.js"></script>
+        <script src="jqueryui.custom/jquery-ui.min.js"></script>
+        <link href="jqueryui.custom/jquery-ui.min.css" media="all" rel="stylesheet" type="text/css" />
+        <link href="vis/vis.css" media="all" rel="stylesheet" type="text/css" />
+        <style>
+            * {
+                font-family: sans-serif;
+            }
+            .ui-autocomplete {
+                max-height: 20em;
+                overflow-y: scroll;e
+                overflow-x: hidden;
+            }
+            .ui-button, .ui-spinner, .ui-autocomplete-input {
+                max-height: 2em;
+                height: 2em;
+            }
+            
+            div#controls {
+                position: fixed;
+                padding: 0.5em;
+                top:0;
+                left:0;
+                z-index: 1000;
+            }
+            
+            input#blockQty {
+                width: 4em;
+            }
+            input#blockName {
+                width: 20em;
+            }
+            
+            div#loading {
+                background-color: #ddd;
+                width: 20em;
+                height: 5%;
+                right:0;
+                bottom: 2;
+                padding: 2px;
+                
+                position: fixed;
+                z-index: 100000;
+                text-align: right;
+            }
+            
+            div#loading p {
+                vertical-align: top;
+                font-size: 0.8em;
+                font-style: italic;
+                color: #555;
+                margin: 0;
+            }
+            
+            div#console h3 {
+                font-size: 1em;
+                color: #777;
+                margin-bottom: 0;
+                margin-top: 1em;
+            }
+            
+            div#console tr a {
+                text-decoration: none;
+                color: #555;
+            }
+            div#console tr a.raw {
+                color: #955;
+            }
+            div#console tr a.raw::after {
+                content: " (raw)";
+            }
+            
+            div#console tr a:hover {
+                text-decoration: none;
+                color: inherit;
+            }
+            
+            div#console > h3 >span.ui-icon {
+                cursor: pointer;
+            }
+            div#console > h3#outputH {
+                color:#7ad;
+            }
+            
+            div#console > h3#surplusH {
+                color:#c7c;
+            }
+            
+            div#console > h3#resourceH {
+                color:#d88;
+            }
+            
+            div#console {
+                max-height: 90%;
+                overflow-y: scroll;
+                overflow-x: hidden;
+                position: fixed;
+                padding: 0.5em;
+                width: 20em;
+                z-index: 999;
+                top:0;
+                right:0;
+                background-color: white;
+            }
+            
+            div#console table th {
+                color: #777;
+                font-weight: normal;
+                font-style: italic;
+            }
+            div#console div {
+                font-size: 0.8em;
+                width: 100%;
+                color: #777;
+                font-style: italic; 
+            }
+            div#console table {
+                font-size: 0.8em;
+                width: 100%;
+            }
+            .blockName {
+                width:60%;
+                text-align: left;
+            }
+            .blockQty {
+                width:20%;
+                text-align: right;
+            }
+            .blockCost {
+                width:20%;
+                text-align: right;
+            }
+            div#console table tfoot {
+                display:none;
+            }
+            
+            div#balanceDisc {
+                color: #777;
+                font-size: 0.8em;
+                font-style: italic;
+            }
+            
+        </style>
+        <script>
+            var CONFIG_PATH = '';//file:///D:/SteamLibrary/steamapps/common/StarMade/StarMade/data/config/';
+            var ALL_BLOCKS = {};
+            var ALL_BLOCKS_BY_NAME = [];
+            var ALL_RECIPES = {};
+            var FACTORIES = [
+                {color:'#DDD',name:'n/a'},
+                {color:'#FAD',name:'Capsule Refinery'},
+                {color:'#AFD', name: 'Micro Assembler'},
+                {color:'#CCF', name: 'Basic Factory'},
+                {color:'#BBF', name: 'Standard Factory'},
+                {color:'#AAF', name: 'Advanced Factory'}];
+            var BLOCK_COLORS = ['#DDD','#FAA','#DAF','#ADF']
+            var BLOCKED_IDS = ['METAL_MESH','POWER_COIL_ID'];
+            
+            var BLOCK_IDS_TO_UIDS = {};
+            var BLOCK_UIDS_TO_IDS = {};
+            
+            var requirements = false;
+            
+            var nodeSet = new vis.DataSet();
+            var edgeSet = new vis.DataSet();
+            var edgeArray = false;
+            var network;
+            waitingDialog = function(waiting) {
+                if(waiting) {
+                    if(waiting.length>20) {
+                        waiting = waiting.substring(0,20);
+                    }
+                } else {
+                    waiting = 'Please wait...';
+                }
+                if(!waiting.endsWith('...')) {
+                    waiting += '...';
+                }
+                $('#loading').show();
+                $("#loading > p")[0].innerHTML = waiting;
+            }
+            closeWaitingDialog = function() {
+                setTimeout(function(){$("#loading > p")[0].innerHTML = '';$('#loading').hide();},500);
+            };
+            $(document).ready(function() {waitingDialog('Parsing config...');});
+            
+            $.urlParam = function(name){
+                var results = new RegExp('[\?&]' + name + '=([^&#]*)').exec(window.location.href);
+                if (results==null){
+                    return null;
+                } else{
+                    var ret = decodeURIComponent(results[1]) || 0;
+                    if(ret && ret.length && ret.indexOf(';')>=0) {
+                        return ret.split(';');
+                    } 
+                    return [ret];
+                }
+            }
+            
+            
+            $.ajax({
+                type: "GET",
+                url: CONFIG_PATH + 'BlockTypes.properties',
+                dataType: "text",
+                success: function (text) {
+                    var lines = text.split('\n');
+                    for(var i in lines) {
+                        if(lines[i].indexOf('#')==0) continue;
+                        if(lines[i].indexOf('=')<=0) continue;
+                        var line = lines[i].split('=');
+                        var uid = line[0].trim();
+                        var nid = line[1].trim();
+                        BLOCK_IDS_TO_UIDS[nid] = uid;
+                        BLOCK_UIDS_TO_IDS[uid] = nid;
+                    }
+                    $.ajax({
+                        type: "GET",
+                        url: CONFIG_PATH + 'BlockConfig.xml',
+                        dataType: "xml",
+                        success: function (xml) {
+                            var xmlDoc = $.parseXML('<Config>'+xml.documentElement.innerHTML+'</Config>');
+                            var doc = $(xmlDoc);
+                            doc.find('Block').each(function () {
+                                var that = $(this);
+                                if(that.find('Slab').html()=='0' && that.find('Deprecated').html()=='false') {
+                                    new Block(that);
+                                }
+                            });
+                            doc.find('Recipe').each(function () {
+                                var that = $(this);
+                                if(that.attr('name')=='Capsule Refinery') {
+                                    that.find('Product').each(function() {
+                                        var prod = $(this);
+                                        new Recipe(prod,false,1);
+                                    });
+                                }
+                                if(that.attr('name')=='Micro Assembler') {
+                                    that.find('Product').each(function() {
+                                        var prod = $(this);
+                                        new Recipe(prod,false,2);
+                                    });
+                                }
+                            });
+                            $('h3 span').on('click',function(){
+                                $(this).parent().next().toggle();
+                                $(this).toggleClass('ui-icon-folder-open ui-icon-folder-collapsed');
+                            });
+                            $('input#add').button();
+                            $('input#save').button();
+                            $('input#recalc').button();
+                            $('input#recalc').on('click',function() {
+                                updateGraph();
+                            });
+                            $('input#save').on('click',function() {
+                                window.location.href = save();
+                            });
+                            $('input#blockQty').spinner({
+                                max:1000000,
+                                min:1,
+                            });
+                            $('input#blockName').autocomplete({
+                                source:function(request,response){
+                                    var matches = [];
+                                    var input = request.term.toUpperCase();
+                                    for(var i in ALL_BLOCKS_BY_NAME) {
+                                        if(i.toUpperCase().startsWith(input)) {
+                                            matches.push(i);
+                                        }
+                                        if(input.length>3 && i.toUpperCase().indexOf(input)>0) {
+                                            matches.push(i);
+                                        }
+                                    }
+                                    matches.sort(function(a,b){
+                                        if(a && b ) {
+                                            if(a.toUpperCase()<b.toUpperCase()) return -1;
+                                            if(a.toUpperCase()>b.toUpperCase()) return 1;
+                                        }
+                                        return 0;
+                                    });
+                                    response(matches);
+
+                                },
+                                select:function(evt,ui) {
+                                   $('input#blockQty').val(1);
+                                }
+                            });
+                            $('input#add').on('click',function() {
+                                waitingDialog('Adding '+$('input#blockName').val());
+                                var nm = $('input#blockName').val();
+                                var qt = parseInt($('input#blockQty').val());
+                                $('input#blockName').val('');
+                                $('input#blockQty').val(1);
+
+                                setTimeout(function(){showByName(nm,qt)},100);
+                            });
+                            edgeArray = [];
+                            requirements = {};
+                            createGraph();
+                            if($.urlParam('requiredOutput')) {
+                                waitingDialog('Loading blocks...');
+                                setTimeout( function() {
+                                    var requiredByUrl = $.urlParam('requiredOutput');
+                                    for(var i in requiredByUrl) {
+                                        var triplet = [requiredByUrl[i]];
+                                        if(requiredByUrl[i].indexOf(':')>=0) {
+                                            triplet = requiredByUrl[i].split(':');
+                                        }
+                                        var uid = false;
+                                        var qty = 1;
+                                        if (triplet.length == 2) {
+                                            uid = BLOCK_IDS_TO_UIDS[triplet[0].trim()];
+                                            qty = parseInt(triplet[1].trim());
+                                        } else if (triplet.length == 1) {
+                                            uid = BLOCK_IDS_TO_UIDS[triplet[0].trim()];
+                                        } else if (triplet.length>2) {
+                                            uid = BLOCK_IDS_TO_UIDS[triplet[1].trim()];
+                                            qty = parseInt(triplet[2].trim());
+                                        }
+                                        if(uid!==false) {
+                                            if(requirements[uid]) {
+                                                requirements[uid]+=qty;
+                                            } else {
+                                                requirements[uid]=qty;
+                                            }
+                                        }
+                                    }
+                                    showNext(0);
+//                                    var cnt = 0;
+//                                    for(var uid in requirements) {
+//                                        setTimeout(function() {showById(uid,requirements[uid])},++cnt*500);
+////                                        showById(uid,requirements[uid]);
+//                                    }
+                                },100);
+                            }
+                            closeWaitingDialog();
+                        },
+                        error: function (data, textStatus, errorThrown) {
+                            alert(errorThrown);
+                        }
+                    });
+                }
+            });
+            
+            showNext = function(cnt) {
+                var uids = Object.keys(requirements);
+                if(uids.length>cnt) {
+                    setTimeout(function() {
+                        showById(uids[cnt],requirements[uids[cnt]]);
+                        showNext(cnt+1);
+                    },1000);
+                }
+            } 
+            
+            save = function() {
+                var ret = window.location.href;
+                ret = ret.substring(0,ret.indexOf('?'));
+                ret += '?requiredOutput=';
+                for(var i in requirements) {
+                    if(requirements[i]>1) {
+                        ret += BLOCK_UIDS_TO_IDS[i]+':'+requirements[i]+';';
+                    } else {
+                        ret += BLOCK_UIDS_TO_IDS[i]+';';
+                    }
+                }
+                return ret.substring(0,ret.length-1);
+            }
+            
+            toTitleCase = function(str) {
+                return str.replace(/\w\S*/g, function(txt){return txt.charAt(0).toUpperCase() + txt.substr(1).toLowerCase();});
+            };
+            
+            showByName = function(str,qty) {
+                if(!qty) qty=1;
+                var blockId = ALL_BLOCKS_BY_NAME[str];
+                if(!blockId) {
+                    blockId = ALL_BLOCKS_BY_NAME[toTitleCase(str)];
+                }
+                showById(blockId,qty);
+            };
+            
+            showById = function(blockId,qty) {
+                if(!ALL_BLOCKS[blockId]) return;
+                for(var i in BLOCKED_IDS) {
+                    if(BLOCKED_IDS[i]==blockId) {
+                        return;
+                    }
+                }
+                if(blockId) {
+                    var block = ALL_BLOCKS[blockId];
+                    waitingDialog('Adding '+block.name);
+                    requirements[blockId] = qty;
+                    createNode(block,BLOCK_COLORS[3],qty);
+                    var recipes = ALL_RECIPES[blockId];
+                    if(recipes && recipes.length) {
+                        for(var i in recipes) {
+                            createProduction(recipes[i],block,i,qty);
+                        }
+                    }
+                }
+            };
+            
+            createNode = function(block,color,qty,x,y) {
+                var ret = {id:block.id,label:multiline(block.name),shape:'box',requiredQty:qty,factory:false};
+                if(block.desc) {
+                    ret.title = block.desc;
+                }
+                var raw = false;
+                for(var i in BLOCKED_IDS) {
+                    if(BLOCKED_IDS[i]==block.id) {
+                        color = BLOCK_COLORS[0];
+                        raw = true;
+                        break;
+                    }
+                }
+                if(!ALL_RECIPES[block.id]) {
+                    color = BLOCK_COLORS[0];
+                    raw = true;
+                }
+                if(!color) {
+                    color = BLOCK_COLORS[3];
+                }
+                ret.color = color;
+                ret.raw = raw;
+                ret.x = x;
+                ret.y = y;
+                return addNode(ret);
+            };
+            
+            addEdge = function(edge) {
+                if(edgeSet.get(edge.id)) {
+                    return edgeSet.get(edge.id);
+                }
+                edgeArray.push(edge);
+                nodeSet.get(edge.to).ins[edge.id] = edge;
+                nodeSet.get(edge.from).outs[edge.id] = edge;
+                return null;
+            };
+            
+            addNode = function(node) {
+                if(nodeSet.get(node.id)) {
+                    return nodeSet.get(node.id);
+                }
+                node.ins = {};
+                node.outs = {};
+                nodeSet.add(node);
+                return null;
+            };
+            
+            createProduction = function (recipe,targetBlock,index,qty) {
+                var color = FACTORIES[recipe.factory].color;
+                var id = targetBlock.id;
+                var outQty = recipe.outputs[id];
+                var qtyMul = 1;
+                while(outQty<qty) {
+                    qtyMul++;
+                    outQty = recipe.outputs[id]*qtyMul;
+                }
+                var pos = network.getPositions([id])[id];
+                if(!pos) pos = {};
+                else {
+                    pos.x+=Math.random()*10+10;
+                    pos.y+=Math.random()*10+10;
+                }
+                setTimeout(function() {
+                    var factoryId = id+'_factory_'+index;
+                    addNode({id:factoryId,label:multiline(FACTORIES[recipe.factory].name),color:color,mul:qtyMul,factory:true,factoryId:recipe.factory,shape: 'ellipse',x:pos.x,y:pos.y});
+                    setTimeout(function() {
+                        addEdge({id:id+'_prod_'+index,color:color, label: '+'+outQty,qty:outQty,mul:qtyMul,baseQty:recipe.outputs[id],from:factoryId,to:id,arrows:'to'});
+                        for(var i in recipe.outputs) {
+                            if(i!=id) {
+                                var byprod = createNode(ALL_BLOCKS[i],false,recipe.outputs[i]*qtyMul);
+                                addEdge({id:id+'_byprod_'+i,color:color, label: '+'+qtyMul*recipe.outputs[i],qty:qtyMul*recipe.outputs[i],mul:qtyMul,baseQty:recipe.outputs[i],from:factoryId,to:i,arrows:'to'});
+                            }
+                        }
+                        var pos = network.getPositions([factoryId])[factoryId];
+                        if(!pos) pos = {};
+                        else {
+                            pos.x+=Math.random()*10+10;
+                            pos.y+=Math.random()*10+10;
+                        }
+                        for(var i in recipe.inputs) {
+                            createNode(ALL_BLOCKS[i],BLOCK_COLORS[1],recipe.inputs[i]*qtyMul,pos.x,pos.y);
+                            addEdge({id:id+'_input_'+index+"_"+i,label:'+'+recipe.inputs[i]*qtyMul,qty:recipe.inputs[i]*qtyMul,baseQty:recipe.inputs[i],mul:qtyMul,color:color,from:i,to:id+'_factory_'+index,arrows:'to'});
+                        }
+                        setTimeout(function() {
+                            edgeSet.add(edgeArray);
+                            edgeArray = [];
+                            setTimeout(function() {
+                                updateGraph();
+                                updateGraph();
+                            },100);
+                        },100);
+                    },100);
+                },100);
+//                network.stabilize();
+                return outQty-qty;
+            };
+
+            createGraph = function() {
+                var container = $('#graph')[0];
+                var data = {
+                    nodes: nodeSet,
+                    edges: edgeSet
+                };
+                var options = {
+                    interaction: {hover: true},
+                    physics: {
+                        barnesHut: {
+                            gravitationalConstant: -12000,
+                            damping:0.5,
+                            springConstant:0.1
+                        },
+                        minVelocity: 0.75,
+                        maxVelocity: 5
+                    }
+                };
+                network = new vis.Network(container, data, options);
+                network.on("doubleClick", function (params) {
+                    waitingDialog('Expanding...');
+                    setTimeout(function(){appendGraph(params.nodes[0])},100);
+                });
+            };
+            
+            
+            appendGraph = function(blockId) {
+                var block = ALL_BLOCKS[blockId];
+                var node = nodeSet.get(blockId);
+                if(node) {
+                    if(node.raw) {
+                        closeWaitingDialog();
+                        return;
+                    }
+                    node.color = BLOCK_COLORS[2];
+                }
+                var recipes = ALL_RECIPES[blockId];
+                if(recipes && recipes.length) {
+                    for(var i in recipes) {
+                        createProduction(recipes[i],block,i,node.requiredQty);
+                    }
+                }
+            };
+            
+            updateGraph = function() {
+                waitingDialog('Recalculating');
+                calcQties();
+                waitingDialog('Updating display');
+                closeWaitingDialog();
+            };
+            
+            calcQties = function() {
+                var nodeIds = nodeSet.getIds()
+                for(var i in nodeIds) {
+                    var id = nodeIds[i];
+                    var node = nodeSet.get(id);
+                    if(!node.factory) {
+                        var surplus = calcSurplus(node);
+                        var req = requirements[id] ? requirements[id]:0;
+                        if(surplus<req) {
+                            compensate(id, req-surplus);
+                        }
+                    }
+                }
+                updateQties();
+            };
+            
+            updateQties = function() {
+                $('#surplus').empty();
+                $('#resource').empty();
+                $('#output').empty();
+                var rows = {};
+                rows['#surplus']=[];
+                rows['#resource']=[];
+                rows['#output']=[];
+                var nodeIds = nodeSet.getIds();
+                for(var i in nodeIds) {
+                    var id = nodeIds[i];
+                    var node = nodeSet.get(id);
+                    if(!node.factory) {
+                        var surplus = node.incoming - node.outgoing;
+                        if(surplus!=0) {
+                            var sgn = surplus>0 ? '+':'';
+                            node.label = multiline(ALL_BLOCKS[id].name + ' ('+sgn+surplus+')');
+                            var arr = rows['#surplus'];
+                            if(surplus>0) {
+                                if(requirements[id]) {
+                                    arr = rows['#output'];
+                                }
+                            } else {
+                                arr = rows['#resource'];
+                            }
+                            arr.push({name:ALL_BLOCKS[id].name,surplus: sgn+surplus,price:ALL_BLOCKS[id].price*surplus,id:id,raw:node.raw});
+                        } else {
+                            node.label = multiline(ALL_BLOCKS[id].name);
+                        }
+                    } else {
+                        if(node.mul>1) {
+                            node.label = multiline(FACTORIES[node.factoryId].name + '\n(+'+(node.mul-1)+ ')');
+                        }
+                    }
+                    if(requirements[id]) {
+                        node.color = BLOCK_COLORS[3];
+                    } else {
+                        if(!node.raw && !node.factory) {
+                            if($.isEmptyObject(node.ins)) {
+                                node.color = BLOCK_COLORS[1];
+                            } else {
+                                node.color = BLOCK_COLORS[2];
+                            }
+                        }
+                    }
+                    var pos = network.getPositions([id])[id];
+//                    node.x = pos.x;
+//                    node.y = pos.y;
+                    nodeSet.update({id:node.id,label:node.label,color:node.color,x:pos.x,y:pos.y});
+                }
+                var edgeIds = edgeSet.getIds();
+                for(var i in edgeIds) {
+                    var edge = edgeSet.get(edgeIds[i]);
+                    if(!edge)continue;
+                    var sgn = '+';
+                    if(nodeSet.get(edge.to).factory) {
+                        sgn = '-';
+                    }
+                    edge.label = sgn+edge.qty;
+                    if(edgeSet.get(edge.id)) {
+                        edgeSet.update({id:edge.id,label:edge.label});
+                    }
+                }
+                var bal = 0;
+                for(var id in rows) {
+                    rows[id].sort(function(a,b){
+                        if(a && a.name && b && b.name) {
+                            if(a.name.toUpperCase()<b.name.toUpperCase()) return -1;
+                            if(a.name.toUpperCase()>b.name.toUpperCase()) return 1;
+                        }
+                        return 0;
+                    });
+                    var elt = $(id);
+                    var total = 0;
+                    for(var r in rows[id]) {
+                        total += rows[id][r].price;
+                        var htm = '<tr>';
+                        var cls = '';
+                        if(rows[id][r].raw) {
+                            cls = ' class="raw"';
+                        }
+                        htm += '<td class="blockName"><a id="a-'+rows[id][r].id+'" href="javascript:void(0);"'+cls+'>'+rows[id][r].name+'</a></td>';
+                        htm += '<td class="blockQty">'+rows[id][r].surplus+'</td>';
+                        htm += '<td class="blockCost">'+rows[id][r].price+'</td>';
+                        htm += '</tr>';
+                        elt.append(htm);
+                    }
+                    if(rows[id].length) {
+                        $(id+'H').show();
+                        elt.prev().show();
+                        elt.next().show();
+                        elt.next().find('.blockCost.total').html(total);
+                    } else {
+                        $(id+'H').hide();
+                        elt.prev().hide();
+                        elt.next().hide();
+                    }
+                    bal += total;
+                }
+                if(bal) {
+                    var sgn = bal<0?'-':'';
+                    $('#balanceH').show().find('h3').html('Balance: '+sgn+bal+' Cr.');
+                }
+                $('div#console tr a').each(function(idx){
+                    $(this).on('mouseleave',function(){
+                        network.unselectAll();
+                    });
+                    $(this).on('mouseover',function(){
+                        network.unselectAll();
+                        var id = $(this).attr('id').substring(2);
+                        network.selectNodes([id],true);
+                    });
+                });
+                $('#resource a').each(function(idx){
+                    $(this).on('click',function(){
+                        var id = $(this).attr('id').substring(2);
+                        waitingDialog('Expanding');
+                        setTimeout(function() {appendGraph(id);},100);
+                    });
+                });
+               delete rows;
+            };
+            
+            multiline = function(str) {
+                var ret = '';
+                var line = '';
+                var arr = str.split(' ');
+                for(var i in arr) {
+                    if(line.length+arr[i].length<16 && arr[i].indexOf('(')) {
+                        line += arr[i]+' ';
+                    } else {
+                        ret += line+'\n';
+                        line = arr[i]+' ';
+                    }
+                }
+                return ret+line;
+            };
+            
+            compensate = function(blockId,delta) {
+                var node = nodeSet.get(blockId);
+                if(!node || node.raw || $.isEmptyObject(node.outs)) return;
+                for(var i in node.ins) {
+                    var edge = node.ins[i];
+                    var reqQty = edge.qty + delta;
+                    while(edge.mul*edge.baseQty<reqQty) {
+                        edge.mul++;
+                        edge.qty+=edge.baseQty;
+                    }
+                    var factory = nodeSet.get(edge.from);
+                    if(edgeSet.get(edge.id)) {
+                        edgeSet.update(edge);
+                    }
+                    var oldMul = factory.mul;
+                    factory.mul = edge.mul;
+                    for(var j in factory.ins) {
+                        var edgeRes = factory.ins[j];
+                        edgeRes.mul = edge.mul;
+                        edgeRes.qty = edgeRes.mul * edgeRes.baseQty;
+                        var nodeRes = nodeSet.get(edgeRes.from);
+                        var surplus = calcSurplus(nodeRes);
+                        if(edgeSet.get(edgeRes.id)) {
+                            edgeSet.update(edgeRes);
+                        }
+                        if(surplus<0) {
+                            compensate(nodeRes.id,-surplus);
+                        }
+                    }
+                    for(var k in factory.outs) {
+                        if(k==edge.id) continue;
+                        var edgeByProd = factory.outs[k];
+                        edgeByProd.mul = edge.mul;
+                        edgeByProd.qty = edgeByProd.mul * edgeByProd.baseQty;
+                        var nodeByProd = nodeSet.get(edgeByProd.to);
+                        var surplus = calcSurplus(nodeByProd);
+                        if(edgeSet.get(edgeByProd.id)) {
+                            edgeSet.update(edgeByProd);
+                        }
+                        if(surplus<0) {
+                            compensate(nodeByProd.to,-surplus);
+                        }
+                    }
+                }
+            }
+            
+            calcSurplus = function(node) {
+                var incoming = 0;
+                var outgoing = 0;
+                for(var i in node.ins) {
+                    var edge = node.ins[i];
+                    incoming += edge.qty;
+                }
+                for(var j in node.outs) {
+                    var edge = node.outs[j];
+                    outgoing += edge.qty;
+                }
+                node.incoming = incoming;
+                node.outgoing = outgoing;
+                nodeSet.update({id:node.id,incoming:node.incoming,outgoing:node.outgoing});
+                return incoming-outgoing;
+            }
+            
+            Block = function(xml) {
+                this.name = xml.attr('name').split('-').join(' ');
+                this.id = xml.attr('type');
+                this.desc = xml.find('Description').html();
+                var spl = this.desc.indexOf('-Structural Stats-');
+                this.desc = this.desc.substring(0,spl-1);
+                this.price = parseInt(xml.find('Price').html());
+//                this.price = 0;
+                this.factory = xml.find('ProducedInFactory').html();
+                var cons = xml.find('Consistence');
+                if(cons && cons.html()) {
+                    new Recipe(cons,this.id, this.factory);
+                }
+                ALL_BLOCKS[this.id] = this;
+                ALL_BLOCKS_BY_NAME[this.name] = this.id;
+                return this;
+            };
+            
+            Recipe = function(xml,resultId,factory) {
+                this.inputs = {};
+                this.outputs = {};
+                this.factory = factory;
+                var inputs = this.inputs;
+                var outputs = this.outputs;
+                if(xml.prop("tagName")=='Consistence') {
+                    this.outputs[resultId] = 1;
+                    xml.find('Item').each(function () {
+                        var that = $(this);
+                        var blockId = that.html();
+                        var qty = parseInt(that.attr('count'));
+                        inputs[blockId] = qty;
+                    });
+                } else {
+                    xml.find('Input > Item').each(function() {
+                        var that = $(this);
+                        var blockId = that.html();
+                        var qty = parseInt(that.attr('count'));
+                        inputs[blockId] = qty;
+                    });
+                    xml.find('Output > Item').each(function() {
+                        var that = $(this);
+                        var blockId = that.html();
+                        var qty = parseInt(that.attr('count'));
+                        outputs[blockId] = qty;
+                    });
+                }
+                for(var id in this.outputs) {
+                    if(!ALL_RECIPES[id]) {
+                        ALL_RECIPES[id] = [];
+                    }
+                    ALL_RECIPES[id].push(this);
+                }
+            };
+        </script>
+    </head>
+    <body>
+        <div id='loading'><p></p></div>
+        <div id='controls'>
+            <input type="text" id="blockName" placeholder="block name">
+            <input type="text" id="blockQty" placeholder="qty" value="1">
+            <input type="button" id="add" value="Add">
+        </div>
+        <div id='console'>
+            <h3 id='outputH'  style="display: none;"><span class='ui-icon ui-icon-folder-open'></span>Required Output<input type="button" value="Save" id="save" style="float:right;"/></h3>
+            <table>
+                <thead style="display: none;">
+                    <th class="blockName">Block</th>
+                    <th class="blockQty">Qty.</th>
+                    <th class="blockCost">Price</th>
+                </thead>
+                <tbody id='output'></tbody>
+                <tfoot style="display: none;">
+                    <th colspan="2" class="blockQty">Total:</th>
+                    <td class="blockCost total"></td>
+                </tfoot>
+            </table>
+            <h3 id='surplusH'  style="display: none;"><span class='ui-icon ui-icon-folder-open'></span>Surplus Output</h3>
+            <table>
+                <thead style="display: none;">
+                    <th class="blockName">Block</th>
+                    <th class="blockQty">Qty.</th>
+                    <th class="blockCost">Price</th>
+                </thead>
+                <tbody id='surplus'></tbody>
+                <tfoot style="display: none;">
+                    <th colspan="2" class="blockQty">Total:</th>
+                    <td class="blockCost total"></td>
+                </tfoot>
+            </table>
+            <h3 id='resourceH'  style="display: none;"><span class='ui-icon ui-icon-folder-open'></span>Required Input</h3>
+            <table>
+                <thead style="display: none;">
+                    <th class="blockName">Block</th>
+                    <th class="blockQty">Qty.</th>
+                    <th class="blockCost">Price</th>
+                </thead>
+                <tbody id='resource'></tbody>
+                <tfoot style="display: none;">
+                    <th colspan="2" class="blockQty">Total:</th>
+                    <td class="blockCost total"></td>
+                </tfoot>
+            </table>
+            <div id='balanceH' style="display: none;">
+                <h3>Balance</h3>
+                Please keep in mind that price calculations are based on default prices. These may (and probably will) differ from the ones you observe in your game.
+            </div>
+            <input type="button" id="recalc" value="Recalculate"/>
+        </div>
+        <div id='graph' style="width:100%;height: 100%;"></div>
+    </body>
+</html>
